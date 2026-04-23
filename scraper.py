@@ -47,11 +47,11 @@ def extract_next_links(url, resp):
     tokens_min = [t for t in tokens_not_urls if len(t) > 1]
     tokens_not_numeric = [t for t in tokens_min if not t.isnumeric()]
 
-    if len(tokens_numeric) > longest_page["count"]:
+    if len(tokens_not_numeric) > longest_page["count"]:
         longest_page["url"] = url
-        longest_page["count"] = len(tokens_numeric)
+        longest_page["count"] = len(tokens_not_numeric)
 
-    for token in tokens_numeric:
+    for token in tokens_not_numeric:
         word_count[token] = word_count.get(token, 0) + 1
 
     parsed = urlparse(url)
