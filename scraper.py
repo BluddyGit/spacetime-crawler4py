@@ -44,7 +44,7 @@ def extract_next_links(url, resp):
     tokens = re.split(r"\W+", text.lower())
     tokens_list = [t for t in tokens if t]
     tokens_not_urls = [t for t in tokens_list if not any(t.startswith(word) for word in ["http", "https", "www", "uci", "edu", "html", "htm"])]
-    tokens_min = [t for t in tokens_urls if len(t) > 1]
+    tokens_min = [t for t in tokens_not_urls if len(t) > 1]
     tokens_not_numeric = [t for t in tokens_min if not t.isnumeric()]
 
     if len(tokens_numeric) > longest_page["count"]:
