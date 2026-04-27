@@ -2,6 +2,7 @@ from bs4 import BeautifulSoup
 
 import re
 from urllib.parse import urlparse, urljoin, urldefrag
+import atexit
 
 def scraper(url, resp):
     links = extract_next_links(url, resp)
@@ -11,6 +12,24 @@ unique_pages = set()
 word_count = {}
 longest_page = {"url" : "", "count" : 0}
 subdomains = {}
+
+STOP_WORDS = set([
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", 
+    "any", "are", "aren", "as", "at", "be", "because", "been", "before", "being", 
+    "below", "between", "both", "but", "by", "can", "cannot", "could", "couldn", 
+    "did", "didn", "do", "does", "doesn", "doing", "don", "down", "during", "each", 
+    "few", "for", "from", "further", "had", "hadn", "has", "hasn", "have", "haven", 
+    "having", "he", "her", "here", "hers", "herself", "him", "himself", "his", "how", 
+    "i", "if", "in", "into", "is", "isn", "it", "its", "itself", "let", "me", "more", 
+    "most", "mustn", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", 
+    "only", "or", "other", "ought", "our", "ours", "ourselves", "out", "over", "own", 
+    "same", "shan", "she", "should", "shouldn", "so", "some", "such", "than", "that", 
+    "the", "their", "theirs", "them", "themselves", "then", "there", "these", "they", 
+    "this", "those", "through", "to", "too", "under", "until", "up", "very", "was", 
+    "wasn", "we", "were", "weren", "what", "when", "where", "which", "while", "who", 
+    "whom", "why", "will", "with", "won", "would", "wouldn", "you", "your", "yours", 
+    "yourself", "yourselves"
+])
 
 # Implementation required.
 def extract_next_links(url, resp):
@@ -35,17 +54,18 @@ def extract_next_links(url, resp):
     #         resp.raw_response.content: the content of the page!
     soup = BeautifulSoup(resp.raw_response.content, "lxml")
 
-    urls = []
+    # Prevent processing the exact duplicate pages
+    defragged_url = urldefrag(url).url
+    if defragged_url in unique_pages:
+        return []
+    unique_pages.add(defragged_url)
 
-    # url: the URL that was used to get the page
-    unique_pages.add(urldefrag(url).url)
+    urls = []
     for tag in soup.find_all("a"):
         href = tag.get("href")
-        if href is None:
-            continue
-        
-        new_url = urldefrag(urljoin(url, href)).url
-        urls.append(new_url)
+        if href:
+            new_url = urldefrag(urljoin(url, href)).url
+            urls.append(new_url)
 
     for tag in soup(["script", "style"]):
         tag.decompose()
@@ -57,22 +77,25 @@ def extract_next_links(url, resp):
     tokens_not_urls = [t for t in tokens_list if not any(t.startswith(word) for word in ["http", "https", "www", "uci", "edu", "html", "htm"])]
     tokens_min = [t for t in tokens_not_urls if len(t) > 1]
     tokens_not_numeric = [t for t in tokens_min if not t.isnumeric()]
+    valid_tokens = [t for t in tokens_not_numeric if t not in STOP_WORDS]
 
-    if len(tokens_not_numeric) < 50:
+    if len(valid_tokens) < 50:
         return []
 
-    if len(tokens_not_numeric) > longest_page["count"]:
+    if len(valid_tokens) > longest_page["count"]:
         longest_page["url"] = url
-        longest_page["count"] = len(tokens_not_numeric)
+        longest_page["count"] = len(valid_tokens)
 
-    for token in tokens_not_numeric:
+    for token in valid_tokens:
         word_count[token] = word_count.get(token, 0) + 1
 
-    parsed = urlparse(url)
+    parsed = urlparse(defragged_url)
     netloc = parsed.netloc
-    if netloc not in subdomains:
-        subdomains[netloc] = set()
-    subdomains[netloc].add(url)
+
+    if any(netloc.endswith(domain) for domain in [".ics.uci.edu", ".cs.uci.edu", ".informatics.uci.edu", ".stat.uci.edu"]) or netloc in ["ics.uci.edu", "cs.uci.edu", "informatics.uci.edu", "stat.uci.edu"]:
+        if netloc not in subdomains:
+            subdomains[netloc] = set()
+        subdomains[netloc].add(defragged_url)
 
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
     return urls
@@ -88,39 +111,47 @@ def is_valid(url):
         if not any(parsed.netloc.endswith(domain) for domain in [".ics.uci.edu", ".cs.uci.edu", ".informatics.uci.edu", ".stat.uci.edu"]):
             return False
 
-        # Trap 1: Long URLs
+        # Trap: Long URLs
         if len(url) > 200:
             return False
         
-        # Trap 2: Repeating directories in path
+        # Trap: Too many query parameters (e.g ?a=1&b=2&c=3&d=4...)
+        if url.count('?') > 0 and url.count('&') > 3:
+            return False
+        
+        # Trap: Repeating directories in path
         if re.match(r"^.*?(/.+?/).*?\1.*$|^.*?/(.+?/)\2.*$", parsed.path):
             return False
 
-        # Trap 3: Calendar/Date Trap: Catches things like /a/b/a/b/a
-        if re.search(r"/(19|20)\d{2}-[0-1]\d", parsed.path):
+        # Trap: Calendar/Date Formats (Catches /2024/09 or /2024-09)
+        if re.search(r"/(19|20)\d{2}[-/]\d{2}", parsed.path.lower()):
             return False
 
-        # Trap 4: Too many query parameters (e.g ?a=1&b=2&c=3...)
+        # Trap: Too many query parameters (e.g ?a=1&b=2&c=3...)
         if url.count('?') > 0 and url.count('&') > 3:
             return False
-
-        # Trap 5: .pdf is hiding in the query parameters
-        if "do=export_pdf" in parsed.query.lower():
+        
+        # Trap: DokuWiki infinite index and action
+        if "doku.php" in parsed.path.lower():
             return False
         
-        # Trap 6: DokuWiki infinite index and action
-        if "doku.php" in parsed.path.lower() and parsed.query:
+        # Trap: Dokuwiki excessively deep namespaces (saw a lot of this in your log)
+        if parsed.path.count(':') > 2:
             return False
         
-        # Traps: Social sharing links
-        if "share=" in parsed.query.lower():
+        # Trap: WICS / School quarters infinite future loops (e.g., winter-2026-week-8)
+        if re.search(r"/(fall|winter|spring|summer)-\d{4}", parsed.path.lower()):
+            return False
+        
+        trap_params = ['skin=', 'lang=', 'action=', 'replytocom=', 'share=', 'version=', 'do=export', 'jmepopupweb=']
+        if any(param in parsed.query.lower() for param in trap_params):
             return False
         
         # Trap: Infinite Calendars and iCal exports
         if "ical=" in parsed.query.lower():
             return False
         
-        # Trap: Event Calendar paths (very common on ICS WordPress sites)
+        # Trap: Event Calendar paths 
         if "/events/" in parsed.path.lower() or "/event/" in parsed.path.lower():
             return False
 
@@ -138,22 +169,49 @@ def is_valid(url):
             return False
 
         # Trap: Common raw data and code directories in faculty/student spaces
-        if "/~" in parsed.path.lower():
-            # If it's a personal directory, block common non-webpage folders
-            if re.search(r'/(?:code|src|data|dataset|datasets|bin|patch|releases)/', parsed.path.lower()):
-                return False
+        if "/~" in parsed.path.lower() and re.search(r'/(?:code|src|data|dataset|datasets|bin|patch|releases)/', parsed.path.lower()):
+            return False
         
         # Trap: Faculty publication, papers, and citation directories
         # Matches paths like /pub/, /pubs/, /papers/, or files like publications.html
-        if re.search(r'/(?:pub|pubs|publications|papers|research-papers)(?:/|\.html?$)', parsed.path.lower()):
+        if re.search(r'/(?:pub|pubs|publications|papers|research-papers|presentations)(?:/|\.html?$)', parsed.path.lower()):
             return False
-        
-        # Trap: Auto-generated HTML slide decks (e.g., sld001.htm, slide01.html)
         if re.search(r'/(?:sld|slide)\d+\.html?$', parsed.path.lower()):
             return False
         
-        # Trap: General Presentation folders (like WScacchi's massive archive)
-        if "presentations" in parsed.path.lower():
+        if "dale-cooper" in parsed.netloc.lower():
+            return False
+        if "mailman" in parsed.netloc or "/mailman/" in parsed.path.lower():
+            return False
+        if "wp-login.php" in parsed.path.lower() or "wp-admin" in parsed.path.lower():
+            return False
+        
+        # Trap: Dynamic time-based server dashboards (Grafana)
+        if "grafana" in parsed.netloc.lower() or "from=" in parsed.query.lower():
+            return False
+        
+        # Trap: Helpdesk tickets and Request Tracker databases
+        if re.search(r'/(ticket|requesttracker|dtr)/', parsed.path.lower()):
+            return False
+        
+        # Trap: Block login, registration, and password reset pages
+        if re.search(r'/(auth|login|register|password_reset|contribute)', parsed.path.lower()):
+            return False
+
+        # Trap: Raw WordPress post and page IDs (e.g., ?p=123 or ?page_id=123)
+        if re.match(r'^p=\d+', parsed.query.lower()) or re.match(r'^page_id=\d+', parsed.query.lower()):
+            return False
+            
+        # Trap: WordPress editor artifacts/glitches
+        if "_wp_link_placeholder" in parsed.path.lower():
+            return False
+            
+        # Trap: Block the beta test site so we don't crawl duplicates
+        if "archive-beta.ics.uci.edu" in parsed.netloc.lower():
+            return False
+            
+        # Trap: Block the dynamic sorting queries on the ML archive
+        if "order=" in parsed.query.lower():
             return False
         
         return not re.match(
@@ -169,3 +227,33 @@ def is_valid(url):
     except TypeError:
         print ("TypeError for ", parsed)
         raise
+
+
+def generate_report():
+    print("\n" + "="*60)
+    print("                 CRAWLER REPORT")
+    print("="*60)
+
+    # 1. Unique pages
+    print(f"\n1. Total unique pages found: {len(unique_pages)}")
+
+    # 2. Longest page
+    print(f"\n2. Longest page in terms of words:")
+    print(f"   URL: {longest_page['url']}")
+    print(f"   Word Count: {longest_page['count']}")
+
+    # 3. 50 Most Common Words (ignoring stop words)
+    print("\n3. Top 50 most common words:")
+    sorted_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)[:50]
+    for rank, (word, count) in enumerate(sorted_words, 1):
+        print(f"   {rank}. {word}: {count}")
+
+    # 4. Subdomains
+    print("\n4. Subdomains in target domains:")
+    for sub in sorted(subdomains.keys()):
+        print(f"   {sub}, {len(subdomains[sub])}")
+    
+    print("="*60 + "\n")
+
+# This tells Python to automatically run the function above when the crawler finishes OR when you press Ctrl+C
+atexit.register(generate_report)
